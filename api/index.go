@@ -20,16 +20,24 @@ type Emoji struct {
 	Name string `json:"name,omitempty"`
 }
 
-type Component struct {
-	Type        int    `json:"type"`
-	Style       int    `json:"style,omitempty"`
-	Label       string `json:"label,omitempty"`
-	CustomID    string `json:"custom_id,omitempty"`
+type SelectOption struct {
+	Label       string `json:"label"`
+	Value       string `json:"value"`
+	Description string `json:"description,omitempty"`
 	Emoji       *Emoji `json:"emoji,omitempty"`
-	MinLength   int    `json:"min_length,omitempty"`
-	MaxLength   int    `json:"max_length,omitempty"`
-	Placeholder string `json:"placeholder,omitempty"`
-	Required    bool   `json:"required,omitempty"`
+}
+
+type Component struct {
+	Type        int            `json:"type"`
+	Style       int            `json:"style,omitempty"`
+	Label       string         `json:"label,omitempty"`
+	CustomID    string         `json:"custom_id,omitempty"`
+	Emoji       *Emoji         `json:"emoji,omitempty"`
+	MinLength   int            `json:"min_length,omitempty"`
+	MaxLength   int            `json:"max_length,omitempty"`
+	Placeholder string         `json:"placeholder,omitempty"`
+	Required    bool           `json:"required,omitempty"`
+	Options     []SelectOption `json:"options,omitempty"`
 }
 
 type ActionRow struct {
@@ -46,8 +54,9 @@ type Interaction struct {
 		} `json:"user"`
 	} `json:"member"`
 	Data struct {
-		Name     string `json:"name,omitempty"`
-		CustomID string `json:"custom_id,omitempty"`
+		Name     string   `json:"name,omitempty"`
+		CustomID string   `json:"custom_id,omitempty"`
+		Values   []string `json:"values,omitempty"`
 		Options  []struct {
 			Name  string `json:"name"`
 			Value string `json:"value"`
@@ -181,7 +190,7 @@ func handleGenerateCode(w http.ResponseWriter, interaction Interaction) {
 
 	newCode := generateB612Code()
 	err := saveCodeToSupabase(newCode, roleID)
-	
+
 	var responseMsg string
 	if err != nil {
 		responseMsg = "❌ เกิดข้อผิดพลาดในการบันทึกรหัสลงฐานข้อมูล"
@@ -199,26 +208,38 @@ func handleGenerateCode(w http.ResponseWriter, interaction Interaction) {
 }
 
 func handleSetupWelcome(w http.ResponseWriter) {
+	dropdown := Component{
+		Type:        3,
+		CustomID:    "select_basic_role",
+		Placeholder: "คลิกเพื่อเลือก Role พื้นฐานของคุณ...",
+		Options: []SelectOption{
+			{
+				Label:       "Guest",
+				Value:       "889899263843258389", // TODO: เปลี่ยนเป็น Role ID จริง
+				Description: "For every new entries guys",
+				Emoji:       &Emoji{Name: "👤"},
+			},
+		},
+	}
+
 	btn := Component{
 		Type:     2,
 		Style:    1,
 		Label:    "Redeem Code",
 		CustomID: "btn_redeem_code",
-		Emoji: &Emoji{Name: "🎟️"},
+		Emoji:    &Emoji{Name: "🎟️"},
 	}
 
-	row := ActionRow{
-		Type:       1,
-		Components: []Component{btn},
-	}
+	row1 := ActionRow{Type: 1, Components: []Component{dropdown}}
+	row2 := ActionRow{Type: 1, Components: []Component{btn}}
 
-	responseMsg := "ยินดีต้อนรับสู่เซิร์ฟเวอร์! 👋\nหากคุณมี 1-Time Code (B612-xxxxxx) สำหรับรับ Role พิเศษ สามารถกดปุ่มด้านล่างเพื่อกรอกรหัสได้เลยครับ"
+	responseMsg := "ยินดีต้อนรับสู่เซิร์ฟเวอร์! 👋\nกรุณาเลือก Role พื้นฐานของคุณจากเมนูด้านล่าง หรือหากคุณมี 1-Time Code สามารถกดปุ่มเพื่อ Redeem รับ Role พิเศษได้เลยครับ"
 
 	sendJSONResponse(w, InteractionResponse{
 		Type: 4,
 		Data: &InteractionResponseData{
 			Content:    responseMsg,
-			Components: []ActionRow{row},
+			Components: []ActionRow{row1, row2},
 		},
 	})
 }
@@ -261,7 +282,7 @@ func handleModalSubmit(w http.ResponseWriter, interaction Interaction) {
 
 	roleID, err := redeemCodeFromSupabase(userCode)
 	var resultMessage string
-	
+
 	if err != nil {
 		resultMessage = fmt.Sprintf("❌ รหัส **`%s`** ไม่ถูกต้อง หรืออาจจะถูกใช้งานไปแล้วครับ", userCode)
 	} else {
@@ -271,6 +292,34 @@ func handleModalSubmit(w http.ResponseWriter, interaction Interaction) {
 		} else {
 			resultMessage = fmt.Sprintf("🎉 ยินดีด้วยครับ! รหัส **`%s`** ถูกต้อง คุณได้รับ Role เรียบร้อยแล้ว!", userCode)
 		}
+	}
+
+	sendJSONResponse(w, InteractionResponse{
+		Type: 4,
+		Data: &InteractionResponseData{
+			Content: resultMessage,
+			Flags:   64,
+		},
+	})
+}
+
+func handleRoleSelect(w http.ResponseWriter, interaction Interaction) {
+	if len(interaction.Data.Values) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	selectedRoleID := interaction.Data.Values[0]
+	userID := interaction.Member.User.ID
+	guildID := interaction.GuildID
+
+	err := assignRoleToUser(guildID, userID, selectedRoleID)
+
+	var resultMessage string
+	if err != nil {
+		resultMessage = fmt.Sprintf("❌ บอทไม่สามารถให้ Role ได้: %v", err)
+	} else {
+		resultMessage = fmt.Sprintf("✅ คุณได้รับ Role <@&%s> เรียบร้อยแล้วครับ!", selectedRoleID)
 	}
 
 	sendJSONResponse(w, InteractionResponse{
@@ -328,6 +377,10 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	case 3: // Message Components (Button Click)
 		if interaction.Data.CustomID == "btn_redeem_code" {
 			handleRedeemClick(w)
+			return
+		}
+		if interaction.Data.CustomID == "select_basic_role" {
+			handleRoleSelect(w, interaction)
 			return
 		}
 	case 5: // Modal Submit
