@@ -12,6 +12,23 @@ import (
 	"os"
 )
 
+type Emoji struct {
+	Name string `json:"name,omitempty"`
+}
+
+type Component struct {
+	Type     int    `json:"type"`
+	Style    int    `json:"style,omitempty"`
+	Label    string `json:"label,omitempty"`
+	CustomID string `json:"custom_id,omitempty"`
+	Emoji    *Emoji `json:"emoji,omitempty"`
+}
+
+type ActionRow struct {
+	Type       int         `json:"type"`
+	Components []Component `json:"components"`
+}
+
 type Interaction struct {
 	Type int `json:"type"`
 	Data struct {
@@ -31,6 +48,7 @@ type InteractionResponse struct {
 type InteractionResponseData struct {
 	Content string `json:"content"`
 	Flags   int    `json:"flags,omitempty"`
+	Components []ActionRow `json:"components,omitempty"`
 }
 
 func generateB612Code() string {
@@ -72,6 +90,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Manage Slash Command
+
+	// Generate Code command
 	if interaction.Type == 2 {
 		if interaction.Data.Name == "generate-code" {
 			// Pull Role ID from Admin selected
@@ -93,6 +113,36 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 				Data: &InteractionResponseData{
 					Content: responseMsg,
 					Flags:   64, // Flags 64 = Ephemeral
+				},
+			})
+			return
+		}
+
+		// Setup Welcome command
+		if interaction.Data.Name == "setup-welcome" {
+			btn := Component{
+				Type:     2,
+				Style:    1, 
+				Label:    "Redeem Code",
+				CustomID: "btn_redeem_code", 
+				Emoji: &Emoji{
+					Name: "🎟️",
+				},
+			}
+
+			row := ActionRow{
+				Type:       1,
+				Components: []Component{btn},
+			}
+
+			responseMsg := "ยินดีต้อนรับสู่เซิร์ฟเวอร์! 👋\nหากคุณมี 1-Time Code (B612-xxxxxx) สำหรับรับ Role พิเศษ สามารถกดปุ่มด้านล่างเพื่อกรอกรหัสได้เลยครับ"
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(InteractionResponse{
+				Type: 4, 
+				Data: &InteractionResponseData{
+					Content:    responseMsg,
+					Components: []ActionRow{row},
 				},
 			})
 			return
