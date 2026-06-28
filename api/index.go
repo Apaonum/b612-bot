@@ -12,6 +12,10 @@ import (
 	"os"
 )
 
+// ==========================================
+// 1. Structs
+// ==========================================
+
 type Emoji struct {
 	Name string `json:"name,omitempty"`
 }
@@ -35,7 +39,7 @@ type ActionRow struct {
 
 type Interaction struct {
 	Type    int    `json:"type"`
-	GuildID string `json:"guild_id"` // Role config
+	GuildID string `json:"guild_id"`
 	Member  struct {
 		User struct {
 			ID string `json:"id"`
@@ -48,7 +52,6 @@ type Interaction struct {
 			Name  string `json:"name"`
 			Value string `json:"value"`
 		} `json:"options,omitempty"`
-		// Components structure from modal
 		Components []struct {
 			Type       int `json:"type"`
 			Components []struct {
@@ -66,12 +69,16 @@ type InteractionResponse struct {
 }
 
 type InteractionResponseData struct {
-	Content    string      `json:"content"`
+	Content    string      `json:"content,omitempty"`
 	Flags      int         `json:"flags,omitempty"`
 	Title      string      `json:"title,omitempty"`
 	CustomID   string      `json:"custom_id,omitempty"`
 	Components []ActionRow `json:"components,omitempty"`
 }
+
+// ==========================================
+// 2. Database & API Helpers
+// ==========================================
 
 func generateB612Code() string {
 	b := make([]byte, 3)
@@ -127,7 +134,6 @@ func saveCodeToSupabase(code string, roleID string) error {
 }
 
 func redeemCodeFromSupabase(code string) (string, error) {
-	// ค้นหาโค้ดที่ตรงกันและยังไม่ถูกใช้ (is_used=eq.false)
 	url := os.Getenv("SUPABASE_URL") + "/rest/v1/invite_codes?code=eq." + code + "&is_used=eq.false&select=role_id"
 	payload := `{"is_used":true}`
 
@@ -135,7 +141,6 @@ func redeemCodeFromSupabase(code string) (string, error) {
 	req.Header.Set("apikey", os.Getenv("SUPABASE_KEY"))
 	req.Header.Set("Authorization", "Bearer "+os.Getenv("SUPABASE_KEY"))
 	req.Header.Set("Content-Type", "application/json")
-	// บังคับให้ Supabase คืนค่า row ที่ถูกอัปเดตกลับมา
 	req.Header.Set("Prefer", "return=representation")
 
 	client := &http.Client{}
@@ -147,18 +152,139 @@ func redeemCodeFromSupabase(code string) (string, error) {
 
 	body, _ := io.ReadAll(resp.Body)
 
-	// แปลง JSON Array ที่ตอบกลับมา
 	var result []struct {
 		RoleID string `json:"role_id"`
 	}
 	json.Unmarshal(body, &result)
 
-	// ถ้า array ว่าง แปลว่าหาโค้ดไม่เจอ หรือถูกใช้ไปแล้ว
 	if len(result) == 0 {
 		return "", fmt.Errorf("invalid or already used code")
 	}
 	return result[0].RoleID, nil
 }
+
+// ตัวช่วยสำหรับส่ง JSON Response เพื่อลดโค้ดที่ซ้ำซ้อน
+func sendJSONResponse(w http.ResponseWriter, resp InteractionResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// ==========================================
+// 3. Extracted Event Handlers
+// ==========================================
+
+func handleGenerateCode(w http.ResponseWriter, interaction Interaction) {
+	var roleID string
+	if len(interaction.Data.Options) > 0 {
+		roleID = interaction.Data.Options[0].Value
+	}
+
+	newCode := generateB612Code()
+	err := saveCodeToSupabase(newCode, roleID)
+	
+	var responseMsg string
+	if err != nil {
+		responseMsg = "❌ เกิดข้อผิดพลาดในการบันทึกรหัสลงฐานข้อมูล"
+	} else {
+		responseMsg = fmt.Sprintf("🎟️ สร้าง 1-Time Code สำเร็จ!\nCode: **`%s`**\nผูกกับ Role: <@&%s>\n*(คัดลอกโค้ดนี้ส่งให้ User เพื่อนำไป Redeem ได้เลย)*", newCode, roleID)
+	}
+
+	sendJSONResponse(w, InteractionResponse{
+		Type: 4,
+		Data: &InteractionResponseData{
+			Content: responseMsg,
+			Flags:   64,
+		},
+	})
+}
+
+func handleSetupWelcome(w http.ResponseWriter) {
+	btn := Component{
+		Type:     2,
+		Style:    1,
+		Label:    "Redeem Code",
+		CustomID: "btn_redeem_code",
+		Emoji: &Emoji{Name: "🎟️"},
+	}
+
+	row := ActionRow{
+		Type:       1,
+		Components: []Component{btn},
+	}
+
+	responseMsg := "ยินดีต้อนรับสู่เซิร์ฟเวอร์! 👋\nหากคุณมี 1-Time Code (B612-xxxxxx) สำหรับรับ Role พิเศษ สามารถกดปุ่มด้านล่างเพื่อกรอกรหัสได้เลยครับ"
+
+	sendJSONResponse(w, InteractionResponse{
+		Type: 4,
+		Data: &InteractionResponseData{
+			Content:    responseMsg,
+			Components: []ActionRow{row},
+		},
+	})
+}
+
+func handleRedeemClick(w http.ResponseWriter) {
+	textInput := Component{
+		Type:        4,
+		CustomID:    "input_b612_code",
+		Style:       1,
+		Label:       "กรุณากรอกรหัส B612",
+		Placeholder: "เช่น B612-a1b2c3",
+		MinLength:   11,
+		MaxLength:   11,
+		Required:    true,
+	}
+
+	row := ActionRow{
+		Type:       1,
+		Components: []Component{textInput},
+	}
+
+	sendJSONResponse(w, InteractionResponse{
+		Type: 9, // Modal
+		Data: &InteractionResponseData{
+			CustomID:   "modal_submit_code",
+			Title:      "🎟️ Redeem Role",
+			Components: []ActionRow{row},
+		},
+	})
+}
+
+func handleModalSubmit(w http.ResponseWriter, interaction Interaction) {
+	userCode := ""
+	if len(interaction.Data.Components) > 0 && len(interaction.Data.Components[0].Components) > 0 {
+		userCode = interaction.Data.Components[0].Components[0].Value
+	}
+
+	userID := interaction.Member.User.ID
+	guildID := interaction.GuildID
+
+	roleID, err := redeemCodeFromSupabase(userCode)
+	var resultMessage string
+	
+	if err != nil {
+		resultMessage = fmt.Sprintf("❌ รหัส **`%s`** ไม่ถูกต้อง หรืออาจจะถูกใช้งานไปแล้วครับ", userCode)
+	} else {
+		assignErr := assignRoleToUser(guildID, userID, roleID)
+		if assignErr != nil {
+			resultMessage = fmt.Sprintf("❌ โค้ดถูกต้อง แต่บอทไม่สามารถให้ Role ได้: %v", assignErr)
+		} else {
+			resultMessage = fmt.Sprintf("🎉 ยินดีด้วยครับ! รหัส **`%s`** ถูกต้อง คุณได้รับ Role เรียบร้อยแล้ว!", userCode)
+		}
+	}
+
+	sendJSONResponse(w, InteractionResponse{
+		Type: 4,
+		Data: &InteractionResponseData{
+			Content: resultMessage,
+			Flags:   64,
+		},
+	})
+}
+
+// ==========================================
+// 4. Main Gateway (Routing)
+// ==========================================
 
 func Handler(w http.ResponseWriter, r *http.Request) {
 	pubKeyHex := os.Getenv("DISCORD_PUBLIC_KEY")
@@ -185,146 +311,28 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// PING control
-	if interaction.Type == 1 {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(InteractionResponse{Type: 1})
+	// Routing ตามประเภทของ Interaction
+	switch interaction.Type {
+	case 1: // PING
+		sendJSONResponse(w, InteractionResponse{Type: 1})
 		return
-	}
-
-	// Manage Slash Command
-
-	// Generate Code command
-	if interaction.Type == 2 {
+	case 2: // Slash Commands
 		if interaction.Data.Name == "generate-code" {
-			// Pull Role ID from Admin selected
-			var roleID string
-			if len(interaction.Data.Options) > 0 {
-				roleID = interaction.Data.Options[0].Value
-			}
-
-			// สุ่มโค้ดใหม่
-			newCode := generateB612Code()
-
-			err := saveCodeToSupabase(newCode, roleID)
-			var responseMsg string
-			if err != nil {
-				responseMsg = "❌ เกิดข้อผิดพลาดในการบันทึกรหัสลงฐานข้อมูล"
-			} else {
-				responseMsg = fmt.Sprintf("🎟️ สร้าง 1-Time Code สำเร็จ!\nCode: **`%s`**\nผูกกับ Role: <@&%s>\n*(คัดลอกโค้ดนี้ส่งให้ User เพื่อนำไป Redeem ได้เลย)*", newCode, roleID)
-			}
-
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(InteractionResponse{
-				Type: 4, // Type 4 = Immedietly response
-				Data: &InteractionResponseData{
-					Content: responseMsg,
-					Flags:   64, // Flags 64 = Ephemeral
-				},
-			})
+			handleGenerateCode(w, interaction)
 			return
 		}
-
-		// Setup Welcome command
 		if interaction.Data.Name == "setup-welcome" {
-			btn := Component{
-				Type:     2,
-				Style:    1,
-				Label:    "Redeem Code",
-				CustomID: "btn_redeem_code",
-				Emoji: &Emoji{
-					Name: "🎟️",
-				},
-			}
-
-			row := ActionRow{
-				Type:       1,
-				Components: []Component{btn},
-			}
-
-			responseMsg := "ยินดีต้อนรับสู่เซิร์ฟเวอร์! 👋\nหากคุณมี 1-Time Code (B612-xxxxxx) สำหรับรับ Role พิเศษ สามารถกดปุ่มด้านล่างเพื่อกรอกรหัสได้เลยครับ"
-
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(InteractionResponse{
-				Type: 4,
-				Data: &InteractionResponseData{
-					Content:    responseMsg,
-					Components: []ActionRow{row},
-				},
-			})
+			handleSetupWelcome(w)
 			return
 		}
-	}
-
-	if interaction.Type == 3 {
+	case 3: // Message Components (Button Click)
 		if interaction.Data.CustomID == "btn_redeem_code" {
-
-			textInput := Component{
-				Type:        4, // 4 = Text Input
-				CustomID:    "input_b612_code",
-				Style:       1, // 1 = Short text (1 line text)
-				Label:       "กรุณากรอกรหัส B612",
-				Placeholder: "เช่น B612-a1b2c3",
-				MinLength:   11, // validate (B612- + 6 char)
-				MaxLength:   11,
-				Required:    true,
-			}
-
-			row := ActionRow{
-				Type:       1,
-				Components: []Component{textInput},
-			}
-
-			// Response in Type 9 = Modal (Pop-up modal)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(InteractionResponse{
-				Type: 9,
-				Data: &InteractionResponseData{
-					CustomID:   "modal_submit_code",
-					Title:      "🎟️ Redeem Role",
-					Components: []ActionRow{row},
-				},
-			})
+			handleRedeemClick(w)
 			return
 		}
-	}
-
-	if interaction.Type == 5 {
+	case 5: // Modal Submit
 		if interaction.Data.CustomID == "modal_submit_code" {
-			userCode := ""
-			if len(interaction.Data.Components) > 0 && len(interaction.Data.Components[0].Components) > 0 {
-				userCode = interaction.Data.Components[0].Components[0].Value
-			}
-
-			// fetch user data and server
-			userID := interaction.Member.User.ID
-			guildID := interaction.GuildID
-
-			roleID, err := redeemCodeFromSupabase(userCode)
-
-			var resultMessage string
-			if err != nil {
-				// Wrong Code, Already used code
-				resultMessage = fmt.Sprintf("❌ รหัส **`%s`** ไม่ถูกต้อง หรืออาจจะถูกใช้งานไปแล้วครับ", userCode)
-			} else {
-				// Right and new code -> Use RoleID fron DB to append in Add Role
-				assignErr := assignRoleToUser(guildID, userID, roleID)
-				if assignErr != nil {
-					resultMessage = fmt.Sprintf("❌ โค้ดถูกต้อง แต่บอทไม่สามารถให้ Role ได้: %v", assignErr)
-				} else {
-					resultMessage = fmt.Sprintf("🎉 ยินดีด้วยครับ! รหัส **`%s`** ถูกต้อง คุณได้รับ Role เรียบร้อยแล้ว!", userCode)
-				}
-			}
-
-			// Response to user by Ephemeral
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(InteractionResponse{
-				Type: 4,
-				Data: &InteractionResponseData{
-					Content: resultMessage,
-					Flags:   64,
-				},
-			})
+			handleModalSubmit(w, interaction)
 			return
 		}
 	}
