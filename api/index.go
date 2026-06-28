@@ -35,13 +35,28 @@ type ActionRow struct {
 
 type Interaction struct {
 	Type int `json:"type"`
+	GuildID string `json:"guild_id"` // Role config
+	Member  struct {
+		User struct {
+			ID string `json:"id"`
+		} `json:"user"`
+	} `json:"member"`
 	Data struct {
-		Name     string `json:"name,omitempty"`      
+		Name     string `json:"name,omitempty"`
 		CustomID string `json:"custom_id,omitempty"`
 		Options  []struct {
 			Name  string `json:"name"`
 			Value string `json:"value"`
 		} `json:"options,omitempty"`
+		// Components structure from modal
+		Components []struct {
+			Type       int `json:"type"`
+			Components []struct {
+				Type     int    `json:"type"`
+				CustomID string `json:"custom_id"`
+				Value    string `json:"value"`
+			} `json:"components"`
+		} `json:"components,omitempty"`
 	} `json:"data"`
 }
 
@@ -62,6 +77,31 @@ func generateB612Code() string {
 	b := make([]byte, 3)
 	rand.Read(b)
 	return "B612-" + hex.EncodeToString(b)
+}
+
+func assignRoleToUser(guildID, userID, roleID string) error {
+	botToken := os.Getenv("DISCORD_BOT_TOKEN")
+	url := fmt.Sprintf("https://discord.com/api/v10/guilds/%s/members/%s/roles/%s", guildID, userID, roleID)
+
+	req, err := http.NewRequest(http.MethodPut, url, nil)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Authorization", "Bot "+botToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("failed to assign role, status code: %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func Handler(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +223,51 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 					CustomID:   "modal_submit_code",
 					Title:      "🎟️ Redeem Role",
 					Components: []ActionRow{row},
+				},
+			})
+			return
+		}
+	}
+
+	if interaction.Type == 5 {
+		if interaction.Data.CustomID == "modal_submit_code" {
+			userCode := ""
+			if len(interaction.Data.Components) > 0 && len(interaction.Data.Components[0].Components) > 0 {
+				userCode = interaction.Data.Components[0].Components[0].Value
+			}
+
+			// fetch user data and server
+			userID := interaction.Member.User.ID
+			guildID := interaction.GuildID
+
+			/* 💡 [MOCK LOGIC for current version]
+			   เนื่องจากเรายังไม่ได้ต่อ Database สองบรรทัดล่างนี้คือตัวอย่างการ Mock 
+			   Ex: Used Redeem code: B612-111111 to set Role
+			*/
+			targetCode := "B612-111111" 
+			targetRoleID := "889174712335364208"
+
+			var resultMessage string
+			if userCode == targetCode {
+				// Right code -> Fetch API to set Role immidietly
+				err := assignRoleToUser(guildID, userID, targetRoleID)
+				if err != nil {
+					resultMessage = fmt.Errorf("❌ โค้ดถูกต้อง แต่บอทไม่สามารถให้ Role ได้: %v", err).Error()
+				} else {
+					resultMessage = fmt.Sprintf("🎉 ยินดีด้วยครับ! รหัส **`%s`** ถูกต้อง คุณได้รับ Role เรียบร้อยแล้ว!", userCode)
+				}
+			} else {
+				// Wrong code
+				resultMessage = fmt.Sprintf("❌ รหัส **`%s`** ไม่ถูกต้อง หรืออาจจะถูกใช้งานไปแล้วครับ", userCode)
+			}
+
+			// Response to user by Ephemeral
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(InteractionResponse{
+				Type: 4,
+				Data: &InteractionResponseData{
+					Content: resultMessage,
+					Flags:   64,
 				},
 			})
 			return
