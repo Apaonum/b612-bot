@@ -22,6 +22,10 @@ type Component struct {
 	Label    string `json:"label,omitempty"`
 	CustomID string `json:"custom_id,omitempty"`
 	Emoji    *Emoji `json:"emoji,omitempty"`
+	MinLength   int    `json:"min_length,omitempty"`
+	MaxLength   int    `json:"max_length,omitempty"`
+	Placeholder string `json:"placeholder,omitempty"`
+	Required    bool   `json:"required,omitempty"`
 }
 
 type ActionRow struct {
@@ -32,11 +36,12 @@ type ActionRow struct {
 type Interaction struct {
 	Type int `json:"type"`
 	Data struct {
-		Name    string `json:"name"`
-		Options []struct {
+		Name     string `json:"name,omitempty"`      
+		CustomID string `json:"custom_id,omitempty"`
+		Options  []struct {
 			Name  string `json:"name"`
 			Value string `json:"value"`
-		} `json:"options"`
+		} `json:"options,omitempty"`
 	} `json:"data"`
 }
 
@@ -48,6 +53,8 @@ type InteractionResponse struct {
 type InteractionResponseData struct {
 	Content string `json:"content"`
 	Flags   int    `json:"flags,omitempty"`
+	Title      string      `json:"title,omitempty"`
+	CustomID   string      `json:"custom_id,omitempty"` 
 	Components []ActionRow `json:"components,omitempty"`
 }
 
@@ -142,6 +149,39 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 				Type: 4, 
 				Data: &InteractionResponseData{
 					Content:    responseMsg,
+					Components: []ActionRow{row},
+				},
+			})
+			return
+		}
+	}
+
+	if interaction.Type == 3 {
+		if interaction.Data.CustomID == "btn_redeem_code" {
+			
+			textInput := Component{
+				Type:        4, // 4 = Text Input
+				CustomID:    "input_b612_code",
+				Style:       1, // 1 = Short text (1 line text)
+				Label:       "กรุณากรอกรหัส B612",
+				Placeholder: "เช่น B612-a1b2c3",
+				MinLength:   11, // validate (B612- + 6 char)
+				MaxLength:   11,
+				Required:    true,
+			}
+
+			row := ActionRow{
+				Type:       1, 
+				Components: []Component{textInput},
+			}
+
+			// Response in Type 9 = Modal (Pop-up modal)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(InteractionResponse{
+				Type: 9, 
+				Data: &InteractionResponseData{
+					CustomID:   "modal_submit_code",
+					Title:      "🎟️ Redeem Role",
 					Components: []ActionRow{row},
 				},
 			})
