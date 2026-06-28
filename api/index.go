@@ -17,11 +17,11 @@ type Emoji struct {
 }
 
 type Component struct {
-	Type     int    `json:"type"`
-	Style    int    `json:"style,omitempty"`
-	Label    string `json:"label,omitempty"`
-	CustomID string `json:"custom_id,omitempty"`
-	Emoji    *Emoji `json:"emoji,omitempty"`
+	Type        int    `json:"type"`
+	Style       int    `json:"style,omitempty"`
+	Label       string `json:"label,omitempty"`
+	CustomID    string `json:"custom_id,omitempty"`
+	Emoji       *Emoji `json:"emoji,omitempty"`
 	MinLength   int    `json:"min_length,omitempty"`
 	MaxLength   int    `json:"max_length,omitempty"`
 	Placeholder string `json:"placeholder,omitempty"`
@@ -34,7 +34,7 @@ type ActionRow struct {
 }
 
 type Interaction struct {
-	Type int `json:"type"`
+	Type    int    `json:"type"`
 	GuildID string `json:"guild_id"` // Role config
 	Member  struct {
 		User struct {
@@ -66,10 +66,10 @@ type InteractionResponse struct {
 }
 
 type InteractionResponseData struct {
-	Content string `json:"content"`
-	Flags   int    `json:"flags,omitempty"`
+	Content    string      `json:"content"`
+	Flags      int         `json:"flags,omitempty"`
 	Title      string      `json:"title,omitempty"`
-	CustomID   string      `json:"custom_id,omitempty"` 
+	CustomID   string      `json:"custom_id,omitempty"`
 	Components []ActionRow `json:"components,omitempty"`
 }
 
@@ -102,6 +102,62 @@ func assignRoleToUser(guildID, userID, roleID string) error {
 		return fmt.Errorf("failed to assign role, status code: %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func saveCodeToSupabase(code string, roleID string) error {
+	url := os.Getenv("SUPABASE_URL") + "/rest/v1/invite_codes"
+	payload := fmt.Sprintf(`{"code":"%s", "role_id":"%s", "is_used":false}`, code, roleID)
+
+	req, _ := http.NewRequest("POST", url, bytes.NewBuffer([]byte(payload)))
+	req.Header.Set("apikey", os.Getenv("SUPABASE_KEY"))
+	req.Header.Set("Authorization", "Bearer "+os.Getenv("SUPABASE_KEY"))
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("supabase error: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func redeemCodeFromSupabase(code string) (string, error) {
+	// ค้นหาโค้ดที่ตรงกันและยังไม่ถูกใช้ (is_used=eq.false)
+	url := os.Getenv("SUPABASE_URL") + "/rest/v1/invite_codes?code=eq." + code + "&is_used=eq.false&select=role_id"
+	payload := `{"is_used":true}`
+
+	req, _ := http.NewRequest("PATCH", url, bytes.NewBuffer([]byte(payload)))
+	req.Header.Set("apikey", os.Getenv("SUPABASE_KEY"))
+	req.Header.Set("Authorization", "Bearer "+os.Getenv("SUPABASE_KEY"))
+	req.Header.Set("Content-Type", "application/json")
+	// บังคับให้ Supabase คืนค่า row ที่ถูกอัปเดตกลับมา
+	req.Header.Set("Prefer", "return=representation")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	// แปลง JSON Array ที่ตอบกลับมา
+	var result []struct {
+		RoleID string `json:"role_id"`
+	}
+	json.Unmarshal(body, &result)
+
+	// ถ้า array ว่าง แปลว่าหาโค้ดไม่เจอ หรือถูกใช้ไปแล้ว
+	if len(result) == 0 {
+		return "", fmt.Errorf("invalid or already used code")
+	}
+	return result[0].RoleID, nil
 }
 
 func Handler(w http.ResponseWriter, r *http.Request) {
@@ -149,10 +205,14 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
 			// สุ่มโค้ดใหม่
 			newCode := generateB612Code()
-			
-			// TODO: ในอนาคตเราจะเอา newCode กับ roleID ไป Save ลง Database ตรงนี้
 
-			responseMsg := fmt.Sprintf("🎟️ สร้าง 1-Time Code สำเร็จ!\nCode: **`%s`**\nผูกกับ Role: <@&%s>\n*(คัดลอกโค้ดนี้ส่งให้ User เพื่อนำไป Redeem ได้เลย)*", newCode, roleID)
+			err := saveCodeToSupabase(newCode, roleID)
+			var responseMsg string
+			if err != nil {
+				responseMsg = "❌ เกิดข้อผิดพลาดในการบันทึกรหัสลงฐานข้อมูล"
+			} else {
+				responseMsg = fmt.Sprintf("🎟️ สร้าง 1-Time Code สำเร็จ!\nCode: **`%s`**\nผูกกับ Role: <@&%s>\n*(คัดลอกโค้ดนี้ส่งให้ User เพื่อนำไป Redeem ได้เลย)*", newCode, roleID)
+			}
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(InteractionResponse{
@@ -169,9 +229,9 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		if interaction.Data.Name == "setup-welcome" {
 			btn := Component{
 				Type:     2,
-				Style:    1, 
+				Style:    1,
 				Label:    "Redeem Code",
-				CustomID: "btn_redeem_code", 
+				CustomID: "btn_redeem_code",
 				Emoji: &Emoji{
 					Name: "🎟️",
 				},
@@ -186,7 +246,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(InteractionResponse{
-				Type: 4, 
+				Type: 4,
 				Data: &InteractionResponseData{
 					Content:    responseMsg,
 					Components: []ActionRow{row},
@@ -198,7 +258,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
 	if interaction.Type == 3 {
 		if interaction.Data.CustomID == "btn_redeem_code" {
-			
+
 			textInput := Component{
 				Type:        4, // 4 = Text Input
 				CustomID:    "input_b612_code",
@@ -211,14 +271,14 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			row := ActionRow{
-				Type:       1, 
+				Type:       1,
 				Components: []Component{textInput},
 			}
 
 			// Response in Type 9 = Modal (Pop-up modal)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(InteractionResponse{
-				Type: 9, 
+				Type: 9,
 				Data: &InteractionResponseData{
 					CustomID:   "modal_submit_code",
 					Title:      "🎟️ Redeem Role",
@@ -240,25 +300,20 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 			userID := interaction.Member.User.ID
 			guildID := interaction.GuildID
 
-			/* 💡 [MOCK LOGIC for current version]
-			   เนื่องจากเรายังไม่ได้ต่อ Database สองบรรทัดล่างนี้คือตัวอย่างการ Mock 
-			   Ex: Used Redeem code: B612-111111 to set Role
-			*/
-			targetCode := "B612-111111" 
-			targetRoleID := "889174712335364208"
+			roleID, err := redeemCodeFromSupabase(userCode)
 
 			var resultMessage string
-			if userCode == targetCode {
-				// Right code -> Fetch API to set Role immidietly
-				err := assignRoleToUser(guildID, userID, targetRoleID)
-				if err != nil {
-					resultMessage = fmt.Errorf("❌ โค้ดถูกต้อง แต่บอทไม่สามารถให้ Role ได้: %v", err).Error()
+			if err != nil {
+				// Wrong Code, Already used code
+				resultMessage = fmt.Sprintf("❌ รหัส **`%s`** ไม่ถูกต้อง หรืออาจจะถูกใช้งานไปแล้วครับ", userCode)
+			} else {
+				// Right and new code -> Use RoleID fron DB to append in Add Role
+				assignErr := assignRoleToUser(guildID, userID, roleID)
+				if assignErr != nil {
+					resultMessage = fmt.Sprintf("❌ โค้ดถูกต้อง แต่บอทไม่สามารถให้ Role ได้: %v", assignErr)
 				} else {
 					resultMessage = fmt.Sprintf("🎉 ยินดีด้วยครับ! รหัส **`%s`** ถูกต้อง คุณได้รับ Role เรียบร้อยแล้ว!", userCode)
 				}
-			} else {
-				// Wrong code
-				resultMessage = fmt.Sprintf("❌ รหัส **`%s`** ไม่ถูกต้อง หรืออาจจะถูกใช้งานไปแล้วครับ", userCode)
 			}
 
 			// Response to user by Ephemeral
